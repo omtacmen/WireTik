@@ -7,7 +7,6 @@ const DATA_DIR = path.join(process.cwd(), 'data');
 const NETWORKS_PATH = path.join(DATA_DIR, 'networks.json');
 const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json');
 
-// Función auxiliar para garantizar que los archivos existen
 const ensureFiles = () => {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(NETWORKS_PATH)) fs.writeFileSync(NETWORKS_PATH, '[]');
@@ -68,18 +67,47 @@ export async function POST(request) {
     const auth = `Basic ${Buffer.from(`${routerUser}:${routerPass}`).toString('base64')}`;
     const baseUrl = `http://${routerHost}:${routerPort}/rest`;
 
-    await fetch(`${baseUrl}/interface/wireguard`, {
+    // 1. Crear Interfaz WireGuard
+    const resWg = await fetch(`${baseUrl}/interface/wireguard`, {
       method: 'PUT',
       headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
       body: JSON.stringify({ "name": name, "listen-port": parseInt(port), "comment": "mikroguard" })
     });
+    if (!resWg.ok) { const err = await resWg.json().catch(()=>({})); throw new Error(`Interfaz: ${err.detail || resWg.statusText}`); }
 
-    await fetch(`${baseUrl}/ip/address`, {
+    // 2. Asignar IP
+    const resIp = await fetch(`${baseUrl}/ip/address`, {
       method: 'PUT',
       headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
       body: JSON.stringify({ "address": routerIp, "network": network, "interface": name, "comment": "mikroguard" })
     });
+    if (!resIp.ok) {
+      await fetch(`${baseUrl}/interface/wireguard?name=${name}`, { method: 'DELETE', headers: { 'Authorization': auth } });
+      const err = await resIp.json().catch(()=>({})); throw new Error(`IP: ${err.detail || resIp.statusText}`);
+    }
 
+    // 3. Crear Regla Firewall: Abrir Puerto (INPUT)
+    const resFwIn = await fetch(`${baseUrl}/ip/firewall/filter`, {
+      method: 'PUT',
+      headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        "chain": "input", "action": "accept", "protocol": "udp", "dst-port": port.toString(), "comment": `mikroguard_fw_${name}`
+      })
+    });
+    if (!resFwIn.ok) throw new Error("Fallo al crear regla de Firewall (Puerto). Se requiere revisión manual.");
+
+    // 4. Crear Regla Firewall: Permitir Tráfico de la Red (FORWARD)
+    const netWithMask = network.includes('/') ? network : `${network}/24`; // Aseguramos que tenga máscara
+    const resFwFwd = await fetch(`${baseUrl}/ip/firewall/filter`, {
+      method: 'PUT',
+      headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        "chain": "forward", "action": "accept", "src-address": netWithMask, "comment": `mikroguard_fw_${name}`
+      })
+    });
+    if (!resFwFwd.ok) throw new Error("Fallo al crear regla de Firewall (Tráfico). Se requiere revisión manual.");
+
+    // Recuperar info final
     const info = await fetch(`${baseUrl}/interface/wireguard?name=${name}`, { headers: { 'Authorization': auth } });
     const data = await info.json();
     const realKey = Array.isArray(data) ? data[0]['public-key'] : data['public-key'];
@@ -90,7 +118,9 @@ export async function POST(request) {
     fs.writeFileSync(NETWORKS_PATH, JSON.stringify(db, null, 2));
 
     return NextResponse.json({ success: true, serverPublicKey: realKey });
-  } catch (e) { return NextResponse.json({ success: false, error: e.message }, { status: 500 }); }
+  } catch (e) { 
+    return NextResponse.json({ success: false, error: e.message }, { status: 500 }); 
+  }
 }
 
 export async function DELETE(request) {
@@ -111,6 +141,19 @@ export async function DELETE(request) {
       throw new Error("Protección activa: Esta red no fue creada por la aplicación y no se puede borrar.");
     }
 
+    // 1. Borrar reglas del Firewall asociadas
+    const fwRes = await fetch(`${baseUrl}/ip/firewall/filter?comment=mikroguard_fw_${name}`, { headers: { 'Authorization': auth } });
+    if (fwRes.ok) {
+      const fwData = await fwRes.json();
+      const fwRules = Array.isArray(fwData) ? fwData : (fwData ? [fwData] : []);
+      for (const rule of fwRules) {
+        if (rule['.id']) {
+          await fetch(`${baseUrl}/ip/firewall/filter/${rule['.id']}`, { method: 'DELETE', headers: { 'Authorization': auth } });
+        }
+      }
+    }
+
+    // 2. Borrar la IP asignada a esa interfaz
     const ipRes = await fetch(`${baseUrl}/ip/address?interface=${name}`, { headers: { 'Authorization': auth } });
     const ipData = await ipRes.json();
     const ipAddr = Array.isArray(ipData) ? ipData[0] : ipData;
@@ -119,8 +162,10 @@ export async function DELETE(request) {
       await fetch(`${baseUrl}/ip/address/${ipAddr['.id']}`, { method: 'DELETE', headers: { 'Authorization': auth } });
     }
 
+    // 3. Borrar la interfaz WireGuard
     await fetch(`${baseUrl}/interface/wireguard/${wgInterface['.id']}`, { method: 'DELETE', headers: { 'Authorization': auth } });
 
+    // 4. Limpiar BD Local
     let db = JSON.parse(fs.readFileSync(NETWORKS_PATH, 'utf8'));
     db = db.filter(n => n.name !== name);
     fs.writeFileSync(NETWORKS_PATH, JSON.stringify(db, null, 2));
