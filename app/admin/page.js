@@ -14,7 +14,6 @@ export default function AdminPage() {
   const [isTesting, setIsTesting] = useState(false);
   const [logs, setLogs] = useState([]); 
   
-  // NUEVOS ESTADOS PARA LA CREACIÓN DE RED
   const [createLogs, setCreateLogs] = useState([]); 
   const [isCreating, setIsCreating] = useState(false);
 
@@ -71,13 +70,30 @@ export default function AdminPage() {
     finally { setIsTesting(false); }
   };
 
-  // NUEVA LÓGICA DE CREACIÓN CON FEEDBACK
   const handleCreate = async () => {
     setIsCreating(true);
-    setCreateLogs([`⏳ Iniciando creación de la interfaz "${name}"...`]);
-    
+    setCreateLogs([]); // Limpia la consola
+    setCreateLogs([`⏳ Validando datos para "${name}"...`]);
+
+    // --- NUEVA BARRERA FRONTEND (Validación Local) ---
+    const portExists = savedNetworks.find(n => n.port.toString() === port.toString());
+    if (portExists) {
+      setCreateLogs(prev => [...prev, `❌ Bloqueado: El puerto ${port} ya lo usa la red "${portExists.name}".`]);
+      setCreateLogs(prev => [...prev, `💡 Sugerencia: Prueba a utilizar el puerto ${parseInt(port) + 1}.`]);
+      setIsCreating(false);
+      return;
+    }
+
+    const nameExists = savedNetworks.find(n => n.name.toLowerCase() === name.toLowerCase());
+    if (nameExists) {
+      setCreateLogs(prev => [...prev, `❌ Bloqueado: Ya tienes una red llamada "${name}".`]);
+      setIsCreating(false);
+      return;
+    }
+    // --------------------------------------------------
+
     try {
-      setCreateLogs(prev => [...prev, `📡 Enviando comandos al router...`]);
+      setCreateLogs(prev => [...prev, `📡 Enviando comandos y reglas de Firewall al router...`]);
       const res = await fetch('/api/admin/wireguard', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -86,31 +102,22 @@ export default function AdminPage() {
       const data = await res.json();
       
       if (data.success) { 
-        setCreateLogs(prev => [...prev, `✅ Interfaz y reglas IP creadas correctamente.`]);
-        setCreateLogs(prev => [...prev, `🔄 Sincronizando tabla de redes...`]);
+        setCreateLogs(prev => [...prev, `✅ Interfaz y Firewall configurados correctamente.`]);
+        setCreateLogs(prev => [...prev, `🔄 Actualizando tabla...`]);
         await fetchNetworks(true); 
-        setCreateLogs(prev => [...prev, `🎉 Proceso finalizado con éxito.`]);
+        setCreateLogs(prev => [...prev, `🎉 Red creada con éxito.`]);
       } else { 
-        setCreateLogs(prev => [...prev, `❌ Error del MikroTik: ${data.error}`]);
-        
-        // Añadimos pistas visuales dependiendo del error
-        if (data.error.includes('port')) {
-          setCreateLogs(prev => [...prev, `💡 Pista: El puerto ${port} ya está siendo usado por otro servicio en el router.`]);
-        } else if (data.error.includes('name')) {
-          setCreateLogs(prev => [...prev, `💡 Pista: Ya existe una interfaz llamada "${name}". Prueba con otro nombre.`]);
-        } else if (data.error.includes('address')) {
-          setCreateLogs(prev => [...prev, `💡 Pista: La IP ${routerIp} choca con otra IP o red existente.`]);
-        }
+        setCreateLogs(prev => [...prev, `❌ Error del servidor: ${data.error}`]);
       }
     } catch (e) {
-      setCreateLogs(prev => [...prev, `❌ Error de red interno: No se pudo contactar con el backend.`]);
+      setCreateLogs(prev => [...prev, `❌ Error de red interno.`]);
     } finally {
       setIsCreating(false);
     }
   };
 
   const handleDeleteNetwork = async (networkName) => {
-    if (!confirm(`¿Estás seguro de que quieres borrar la red ${networkName}? Se eliminará del router.`)) return;
+    if (!confirm(`¿Estás seguro de que quieres borrar la red ${networkName}? Se eliminará del router junto con su Firewall.`)) return;
     try {
       const res = await fetch('/api/admin/wireguard', {
         method: 'DELETE',
@@ -188,7 +195,6 @@ export default function AdminPage() {
           </div>
         </div>
 
-        {/* NUEVO PANEL DE LOGS DE CREACIÓN */}
         {createLogs.length > 0 && (
           <div style={{...logPanelStyle, background: '#0f172a', marginBottom: '20px'}}>
             {createLogs.map((log, i) => (
@@ -200,7 +206,7 @@ export default function AdminPage() {
         )}
 
         <button onClick={handleCreate} disabled={isCreating} style={{...btnPri, width: '100%'}}>
-          {isCreating ? '⏳ Creando...' : '🚀 Crear Interfaz en Router'}
+          {isCreating ? '⏳ Validando y Creando...' : '🚀 Crear Interfaz en Router'}
         </button>
       </section>
 
@@ -238,7 +244,6 @@ export default function AdminPage() {
   );
 }
 
-// Estilos
 const secStyle = { background: '#f8fafc', padding: '20px', borderRadius: '10px', marginBottom: '20px', border: '1px solid #e2e8f0' };
 const inStyle = { padding: '10px', borderRadius: '5px', border: '1px solid #ccc', width: '100%', boxSizing: 'border-box' };
 const logPanelStyle = { background: '#1e293b', color: '#34d399', padding: '15px', borderRadius: '8px', fontFamily: 'monospace', fontSize: '13px', maxHeight: '150px', overflowY: 'auto', marginBottom: '15px' };
